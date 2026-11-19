@@ -75,6 +75,16 @@ MaxVisibleRows = 14
 | Save All Modified | `timecycle/` | Yes, with backups in `timecycle/backup/` (`.orig`, `.bak1`-`.bak3`) |
 | Discard All Live Changes | removes `_live/` | No |
 
+## Screenshots
+
+![Screenshot 1](Screenshot_2026-11-19_21-37-20.png)
+![Screenshot 2](Screenshot_2026-11-19_21-37-28.png)
+![Screenshot 3](Screenshot_2026-11-19_21-37-58.png)
+![Screenshot 4](Screenshot_2026-11-19_21-38-12.png)
+![Screenshot 5](Screenshot_2026-11-19_21-38-14.png)
+![Screenshot 6](Screenshot_2026-11-19_21-38-17.png)
+![Screenshot 7](Screenshot_2026-11-19_21-39-02.png)
+
 ## Building
 
 Requires Visual Studio (C++ desktop workload) and CMake 3.20+.
