@@ -1,0 +1,25 @@
+# Build output
+build/
+out/
+*.asi
+*.pdb
+*.ilk
+*.exp
+*.lib
+!src/vendor/scripthookv/lib/ScriptHookV.lib
+
+# Game data (not distributed)
+timecycle/
+
+# Runtime files
+*.log
+tce_probe_tmp.xml
+
+# Local-only files
+Screenshots/
+SKILL.md
+
+# IDE
+.vs/
+.vscode/
+*.user
