@@ -784,6 +784,7 @@ namespace
 		// Header
 		drawRectTL(x, y, w, headerH, 9, 10, 13, 248);
 		drawText(title, x + 0.008f, y + 0.010f, 0.44f, 244, 244, 245, 255, 0);
+		drawText("Made by sensin", x, y + 0.017f, 0.25f, 148, 163, 184, 255, 0, true, x + w - 0.008f);
 
 		// Subtitle bar
 		const float subY = y + headerH;
