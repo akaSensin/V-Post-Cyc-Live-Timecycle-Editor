@@ -23,6 +23,7 @@ namespace tc_engine
 	// Find cycle doc index by weather hash (e.g. from _GET_CURRENT_WEATHER_TYPE)
 	int findCycleIndexByWeatherHash(uint32_t hash);
 	const char* weatherNameForFilename(const std::string& filename);
+	const char* weatherNameForHash(uint32_t hash);
 
 	// Live apply helpers (marshal safely to sim thread)
 	void applyCycleLive(size_t docIdx);

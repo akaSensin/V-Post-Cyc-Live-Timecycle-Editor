@@ -8,17 +8,17 @@
 #include <main.h>
 #include <Windows.h>
 #include <filesystem>
+#include <mutex>
 
 namespace
 {
-	bool g_initedHooks = false;
+	std::once_flag g_initOnce;
 	void (*origGetSystemTimeAsFileTime)(LPFILETIME) = nullptr;
 
 	void WINAPI hkGetSystemTimeAsFileTime(LPFILETIME lpSystemTimeAsFileTime)
 	{
-		if (!g_initedHooks)
+		std::call_once(g_initOnce, []()
 		{
-			g_initedHooks = true;
 			if (!game::isSupportedGame())
 			{
 				logger::write("info", "Unsupported exe '%s' - hooks dormant", game::exeName());
@@ -28,7 +28,7 @@ namespace
 				game::resolve();
 				tc_engine::installHooks();
 			}
-		}
+		});
 		origGetSystemTimeAsFileTime(lpSystemTimeAsFileTime);
 	}
 
@@ -43,7 +43,7 @@ namespace
 	}
 }
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/)
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
 {
 	if (reason == DLL_PROCESS_ATTACH)
 	{
@@ -68,6 +68,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/)
 	{
 		keyboardHandlerUnregister(ui_menu::onKeyMessage);
 		scriptUnregister(hModule);
+		if (reserved == nullptr)
+		{
+			MH_DisableHook(MH_ALL_HOOKS);
+			MH_Uninitialize();
+		}
 	}
 	return TRUE;
 }

@@ -38,8 +38,15 @@ namespace
 	std::string extractAttr(const std::string& tagBody, const char* attrName)
 	{
 		std::string key = std::string(attrName) + "=";
-		size_t pos = tagBody.find(key);
-		if (pos == std::string::npos) return {};
+		size_t pos = 0;
+		while (true)
+		{
+			pos = tagBody.find(key, pos);
+			if (pos == std::string::npos) return {};
+			if (pos == 0 || std::isspace((unsigned char)tagBody[pos - 1]))
+				break;
+			pos += key.size();
+		}
 		pos += key.size();
 		if (pos >= tagBody.size()) return {};
 		char q = tagBody[pos];

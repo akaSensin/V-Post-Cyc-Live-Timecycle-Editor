@@ -199,25 +199,25 @@ namespace
 		if (probeMod)
 		{
 			AtArrayRaw md = *(AtArrayRaw*)probeMod;
-			if (md.count == names.size() && canRead((void*)md.ptr, md.count * sizeof(TcModData)))
+			if (md.count > 0 && md.count <= names.size() && canRead((void*)md.ptr, md.count * sizeof(TcModData)))
 			{
-				ok = true;
 				const auto* e = (const TcModData*)md.ptr;
 				std::vector<int> ids(names.size(), INT_MIN);
 				for (uint32_t i = 0; i < md.count; ++i)
 				{
 					int k = (int)std::lround(e[i].v1 - kSentinelBase);
-					if (k < 0 || k >= (int)names.size() || ids[k] != INT_MIN)
+					if (k >= 0 && k < (int)names.size() && ids[k] == INT_MIN)
 					{
-						ok = false;
-						break;
+						ids[k] = e[i].index;
 					}
-					ids[k] = e[i].index;
 				}
-				if (ok)
+				for (size_t k = 0; k < names.size(); ++k)
 				{
-					for (size_t k = 0; k < names.size(); ++k)
+					if (ids[k] != INT_MIN)
+					{
 						g_varIds[names[k]] = ids[k];
+						ok = true;
+					}
 				}
 			}
 		}
@@ -320,11 +320,10 @@ namespace tc_engine
 	{
 		if (Config::get().redirectFromFolder)
 		{
-			if (game::addr_TcCycle_Load)
-				memory(game::addr_TcCycle_Load).hook(&hkTcLoad, &oTcLoad);
+			bool tcOk = game::addr_TcCycle_Load && memory(game::addr_TcCycle_Load).hook(&hkTcLoad, &oTcLoad);
 			if (game::addr_LoadModifierFile)
 				memory(game::addr_LoadModifierFile).hook(&hkLoadMod, &oLoadMod);
-			g_hooksInstalled = (game::addr_TcCycle_Load != 0);
+			g_hooksInstalled = tcOk;
 		}
 		if (game::addr_FrameTick)
 		{
@@ -399,6 +398,22 @@ namespace tc_engine
 		if (low == "w_snowhalloween.xml") return "SNOW_HALLOWEEN";
 		if (low == "w_thunder.xml")       return "THUNDER";
 		if (low == "w_xmas.xml")          return "XMAS";
+		return nullptr;
+	}
+
+	const char* weatherNameForHash(uint32_t hash)
+	{
+		static constexpr const char* kWeathers[] = {
+			"CLEAR", "EXTRASUNNY", "CLOUDS", "OVERCAST", "RAIN",
+			"CLEARING", "THUNDER", "SMOG", "FOGGY", "XMAS",
+			"SNOW", "SNOWLIGHT", "BLIZZARD", "NEUTRAL",
+			"HALLOWEEN", "RAIN_HALLOWEEN", "SNOW_HALLOWEEN"
+		};
+		for (const char* w : kWeathers)
+		{
+			if (joaat(w) == hash)
+				return w;
+		}
 		return nullptr;
 	}
 

@@ -13,7 +13,7 @@ file(GLOB_RECURSE APP_SOURCES CONFIGURE_DEPENDS
 )
 list(FILTER APP_SOURCES EXCLUDE REGEX "src/vendor/")
 
-add_library(TimecycleEditor SHARED ${APP_SOURCES})
+add_library(TimecycleEditor SHARED ${APP_SOURCES} src/version.rc)
 
 set_target_properties(TimecycleEditor PROPERTIES
     OUTPUT_NAME "TimecycleEditor"
@@ -36,6 +36,8 @@ target_link_directories(TimecycleEditor PRIVATE
 target_link_libraries(TimecycleEditor PRIVATE
     minhook
     ScriptHookV
+    winhttp
+    shell32
 )
 
 target_compile_definitions(TimecycleEditor PRIVATE

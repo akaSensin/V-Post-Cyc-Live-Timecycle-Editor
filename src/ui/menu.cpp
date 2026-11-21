@@ -3,6 +3,7 @@
 #include "../core/tc_engine.h"
 #include "../utils/config.h"
 #include "../utils/log.h"
+#include "../utils/updater.h"
 
 #include <natives.h>
 #include <types.h>
@@ -28,8 +29,26 @@ namespace
 		ModVarList,
 		WorldControls,
 		EditorSettings,
+		ThemeSettings,
 		SaveExport
 	};
+
+	struct ThemePreset
+	{
+		const char* name;
+		int r, g, b;
+	};
+
+	constexpr ThemePreset kThemePresets[] = {
+		{ "Ice Blue", 56,  189, 248 },
+		{ "Emerald",  52,  211, 153 },
+		{ "Amber",    251, 191, 36  },
+		{ "Crimson",  248, 113, 113 },
+		{ "Cyan",     34,  211, 238 },
+		{ "Orange",   251, 146, 60  },
+		{ "Silver",   203, 213, 225 }
+	};
+	constexpr int kNumThemePresets = (int)(sizeof(kThemePresets) / sizeof(kThemePresets[0]));
 
 	struct MenuState
 	{
@@ -44,6 +63,7 @@ namespace
 		VarCategory category = VarCategory::All;
 		int  keyframeIdx   = 6;      // 0..12
 		bool editAllHours  = false;
+		bool syncTimeToSlot = true;  // Auto-sync & lock game clock when scrubbing keyframes
 
 		int  modDocIdx     = 0;
 		int  modGroupIdx   = 0;
@@ -54,6 +74,12 @@ namespace
 		float stepSize     = 0.05f;
 		bool  clockFrozen  = false;
 		int   frozenHour   = 12;
+		int   frozenMinute = 0;
+		bool  weatherLocked = false;
+		std::string lockedWeather;
+
+		// UI Theme state
+		int themePresetIdx = 0;
 
 		// On-screen keyboard prompt
 		bool  kbActive     = false;
@@ -84,6 +110,41 @@ namespace
 	{
 		g_st.statusText  = msg;
 		g_st.statusUntil = GetTickCount64() + ms;
+	}
+
+	std::string currentWeatherLabel()
+	{
+		Hash h = GAMEPLAY::_GET_CURRENT_WEATHER_TYPE();
+		const char* wn = tc_engine::weatherNameForHash(h);
+		if (wn) return wn;
+		char buf[24];
+		std::snprintf(buf, sizeof(buf), "0x%08X", (unsigned int)h);
+		return buf;
+	}
+
+	void applyLockedTime(int hour, int minute = 0)
+	{
+		g_st.frozenHour   = ((hour % 24) + 24) % 24;
+		g_st.frozenMinute = std::clamp(minute, 0, 59);
+		TIME::SET_CLOCK_TIME(g_st.frozenHour, g_st.frozenMinute, 0);
+		if (g_st.clockFrozen)
+			TIME::PAUSE_CLOCK(TRUE);
+	}
+
+	void syncThemePresetIdx()
+	{
+		const auto& cfg = Config::get();
+		for (int i = 0; i < kNumThemePresets; ++i)
+		{
+			if (kThemePresets[i].r == cfg.accentR &&
+				kThemePresets[i].g == cfg.accentG &&
+				kThemePresets[i].b == cfg.accentB)
+			{
+				g_st.themePresetIdx = i;
+				return;
+			}
+		}
+		g_st.themePresetIdx = kNumThemePresets; // Custom
 	}
 
 	Page currentPage()
@@ -131,12 +192,24 @@ namespace
 		return false;
 	}
 
+	void clearJustPressed(int exceptVk = -1)
+	{
+		for (int i = 0; i < 256; ++i)
+		{
+			if (i != exceptVk)
+				g_keys[i].justPressed = false;
+		}
+	}
+
 	float effectiveStep()
 	{
+		const auto& cfg = Config::get();
+		const float base = cfg.stepDefault > 0.0f ? cfg.stepDefault : 0.05f;
+		const float scale = g_st.stepSize / base;
 		bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
 		bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-		if (shift) return g_st.stepSize * 10.0f;
-		if (ctrl)  return g_st.stepSize * 0.1f;
+		if (shift) return cfg.stepCoarse * scale;
+		if (ctrl)  return cfg.stepFine * scale;
 		return g_st.stepSize;
 	}
 
@@ -234,7 +307,7 @@ namespace
 		if (!g_st.kbIsMod)
 		{
 			auto& docs = tc_engine::cycleDocs();
-			if (g_st.cycleDocIdx < (int)docs.size())
+			if (g_st.cycleDocIdx >= 0 && g_st.cycleDocIdx < (int)docs.size())
 			{
 				auto& doc = docs[g_st.cycleDocIdx];
 				if (g_st.kbRowIdx < doc.rows.size())
@@ -256,7 +329,7 @@ namespace
 		else
 		{
 			auto& docs = tc_engine::modDocs();
-			if (g_st.modDocIdx < (int)docs.size())
+			if (g_st.modDocIdx >= 0 && g_st.modDocIdx < (int)docs.size())
 			{
 				auto& doc = docs[g_st.modDocIdx];
 				if (g_st.kbRowIdx < doc.rows.size())
@@ -282,42 +355,53 @@ namespace
 
 		if (p == Page::Main)
 		{
-			title    = "TIMECYCLE EDITOR";
-			subtitle = tc_engine::isMarshalReady() ? "LIVE ENGINE READY" : "XML MODE (SIGNATURES MISSING)";
-
+			title = "TIMECYCLE EDITOR";
 			Hash curWeather = GAMEPLAY::_GET_CURRENT_WEATHER_TYPE();
 			int  curHour    = TIME::GET_CLOCK_HOURS();
-			int  curCycIdx  = tc_engine::findCycleIndexByWeatherHash(curWeather);
-			std::string curLabel = "Quick Edit: Active Weather";
+			std::string wn  = currentWeatherLabel();
+			char subBuf[128];
+			std::snprintf(subBuf, sizeof(subBuf), "%s | %s %02d:00%s",
+				tc_engine::isMarshalReady() ? "LIVE" : "XML ONLY",
+				wn.c_str(), curHour, g_st.clockFrozen ? " [LOCKED]" : "");
+			subtitle = subBuf;
+
+			int curCycIdx = tc_engine::findCycleIndexByWeatherHash(curWeather);
+			std::string curLabel = "Quick Edit: " + wn;
 			if (curCycIdx >= 0)
 			{
-				const char* wn = tc_engine::weatherNameForFilename(tc_engine::cycleDocs()[curCycIdx].filename);
 				char buf[96];
-				std::snprintf(buf, sizeof(buf), "Quick Edit: %s (%02d:00)", wn ? wn : "ACTIVE", curHour);
+				std::snprintf(buf, sizeof(buf), "Quick Edit: %s (%02d:00)", wn.c_str(), curHour);
 				curLabel = buf;
 			}
 
 			items.push_back({ curLabel, ">", true });
 			items.push_back({ "Weather Cycles (w_*.xml)", std::to_string(tc_engine::cycleDocs().size()) + " files >" });
 			items.push_back({ "Timecycle Modifiers (mods)", std::to_string(tc_engine::modDocs().size()) + " files >" });
-			items.push_back({ "World Time & Weather", ">" });
-			items.push_back({ "Editor Settings", ">" });
+			items.push_back({ "World Time & Weather", wn + " >" });
+			items.push_back({ "Editor Settings & UI Colors", ">" });
 			items.push_back({ "Save / Export / Reset", ">" });
 		}
 		else if (p == Page::CycleFileList)
 		{
 			title    = "WEATHER CYCLES";
-			subtitle = "Select a w_*.xml file";
+			subtitle = "Current: " + currentWeatherLabel();
+			const Hash curWeather = GAMEPLAY::_GET_CURRENT_WEATHER_TYPE();
+			const int  curIdx     = tc_engine::findCycleIndexByWeatherHash(curWeather);
 			const auto& docs = tc_engine::cycleDocs();
 			for (size_t i = 0; i < docs.size(); ++i)
 			{
-				std::string right = docs[i].dirty ? "*MOD >" : ">";
-				items.push_back({ docs[i].filename, right, docs[i].dirty, false, 0, 0, 0, i });
+				const bool isCur = ((int)i == curIdx);
+				std::string right;
+				if (isCur) right += "[CURRENT] ";
+				right += docs[i].dirty ? "*MOD >" : ">";
+				items.push_back({ docs[i].filename, right, isCur || docs[i].dirty, false, 0, 0, 0, i });
 			}
 		}
 		else if (p == Page::CycleRegionList)
 		{
-			const auto& doc = tc_engine::cycleDocs()[g_st.cycleDocIdx];
+			const auto& docs = tc_engine::cycleDocs();
+			if (g_st.cycleDocIdx < 0 || g_st.cycleDocIdx >= (int)docs.size()) return;
+			const auto& doc = docs[g_st.cycleDocIdx];
 			title    = doc.filename;
 			subtitle = "Select Region";
 			for (size_t i = 0; i < doc.groups.size(); ++i)
@@ -327,7 +411,10 @@ namespace
 		}
 		else if (p == Page::CycleCategoryList)
 		{
-			const auto& doc = tc_engine::cycleDocs()[g_st.cycleDocIdx];
+			const auto& docs = tc_engine::cycleDocs();
+			if (g_st.cycleDocIdx < 0 || g_st.cycleDocIdx >= (int)docs.size()) return;
+			const auto& doc = docs[g_st.cycleDocIdx];
+			if (g_st.cycleGroupIdx < 0 || g_st.cycleGroupIdx >= (int)doc.groups.size()) return;
 			title    = doc.filename;
 			subtitle = doc.groups[g_st.cycleGroupIdx].name + " / Category";
 			for (int c = 0; c < (int)VarCategory::Count; ++c)
@@ -337,12 +424,17 @@ namespace
 		}
 		else if (p == Page::CycleVarList)
 		{
-			const auto& doc = tc_engine::cycleDocs()[g_st.cycleDocIdx];
+			const auto& docs = tc_engine::cycleDocs();
+			if (g_st.cycleDocIdx < 0 || g_st.cycleDocIdx >= (int)docs.size()) return;
+			const auto& doc = docs[g_st.cycleDocIdx];
+			if (g_st.cycleGroupIdx < 0 || g_st.cycleGroupIdx >= (int)doc.groups.size()) return;
 			title    = categoryName(g_st.category);
 			subtitle = doc.filename + " [" + doc.groups[g_st.cycleGroupIdx].name + "]";
 
-			std::string kfLabel = g_st.editAllHours ? "ALL 13 HOURS" : tc_cat::kKeyframeLabels[g_st.keyframeIdx];
+			const int kf = std::clamp(g_st.keyframeIdx, 0, 12);
+			std::string kfLabel = g_st.editAllHours ? "ALL 13 HOURS" : tc_cat::kKeyframeLabels[kf];
 			items.push_back({ "< Keyframe Slot >", kfLabel, true, false, 0, 0, 0, 0, -1 });
+			items.push_back({ "Lock Game Time to Slot", g_st.syncTimeToSlot ? "ON" : "OFF", g_st.syncTimeToSlot, false, 0, 0, 0, 0, -2 });
 
 			auto rowIdxs = filteredCycleRows();
 			for (size_t rIdx : rowIdxs)
@@ -384,7 +476,9 @@ namespace
 		}
 		else if (p == Page::ModGroupList)
 		{
-			const auto& doc = tc_engine::modDocs()[g_st.modDocIdx];
+			const auto& docs = tc_engine::modDocs();
+			if (g_st.modDocIdx < 0 || g_st.modDocIdx >= (int)docs.size()) return;
+			const auto& doc = docs[g_st.modDocIdx];
 			title    = doc.filename;
 			subtitle = "Select Modifier (" + std::to_string(doc.groups.size()) + ")";
 			for (size_t i = 0; i < doc.groups.size(); ++i)
@@ -394,7 +488,10 @@ namespace
 		}
 		else if (p == Page::ModVarList)
 		{
-			const auto& doc = tc_engine::modDocs()[g_st.modDocIdx];
+			const auto& docs = tc_engine::modDocs();
+			if (g_st.modDocIdx < 0 || g_st.modDocIdx >= (int)docs.size()) return;
+			const auto& doc = docs[g_st.modDocIdx];
+			if (g_st.modGroupIdx < 0 || g_st.modGroupIdx >= (int)doc.groups.size()) return;
 			const auto& grp = doc.groups[g_st.modGroupIdx];
 			title    = grp.name;
 			subtitle = doc.filename + " (In-Place Live Patch)";
@@ -418,12 +515,17 @@ namespace
 		}
 		else if (p == Page::WorldControls)
 		{
-			title    = "WORLD TIME & WEATHER";
-			subtitle = "Quick environment controls";
+			std::string curW = currentWeatherLabel();
 			char hBuf[32];
-			std::snprintf(hBuf, sizeof(hBuf), "%02d:00", TIME::GET_CLOCK_HOURS());
+			std::snprintf(hBuf, sizeof(hBuf), "%02d:%02d%s",
+				TIME::GET_CLOCK_HOURS(), TIME::GET_CLOCK_MINUTES(),
+				g_st.clockFrozen ? " [LOCK]" : "");
+			title    = "WORLD TIME & WEATHER";
+			subtitle = "Weather: " + curW + (g_st.weatherLocked ? " [LOCKED]" : "");
+
 			items.push_back({ "< Set Clock Hour >", hBuf });
-			items.push_back({ "Freeze Clock", g_st.clockFrozen ? "ON" : "OFF", g_st.clockFrozen });
+			items.push_back({ "Lock Time", g_st.clockFrozen ? "ON" : "OFF", g_st.clockFrozen });
+			items.push_back({ "Lock Current Weather", g_st.weatherLocked ? "ON" : "OFF", g_st.weatherLocked });
 			items.push_back({ "Clear Active Modifier", "APPLY" });
 
 			static const char* weathers[] = {
@@ -431,7 +533,10 @@ namespace
 				"THUNDER", "CLEARING", "NEUTRAL", "SMOG", "FOGGY", "XMAS", "HALLOWEEN"
 			};
 			for (const char* w : weathers)
-				items.push_back({ std::string("Weather: ") + w, "SET" });
+			{
+				const bool isCur = (_stricmp(curW.c_str(), w) == 0);
+				items.push_back({ std::string("Weather: ") + w, isCur ? "CURRENT" : "SET", isCur });
+			}
 		}
 		else if (p == Page::EditorSettings)
 		{
@@ -441,7 +546,28 @@ namespace
 			std::snprintf(sBuf, sizeof(sBuf), "%.4f", g_st.stepSize);
 			items.push_back({ "< Adjust Step Size >", sBuf });
 			items.push_back({ "Edit All 13 Hours Together", g_st.editAllHours ? "ON" : "OFF", g_st.editAllHours });
+			items.push_back({ "UI Theme & Colors", ">", true });
 			items.push_back({ "Menu Key (from .ini)", Config::get().toggleKeyLabel });
+			items.push_back({ "Check Update", updater::statusLabel(), updater::status() == updater::Status::UpdateAvailable });
+			items.push_back({ "Mod Update (Releases)", "OPEN >" });
+			items.push_back({ "GitHub Page (akaSensin)", "OPEN >" });
+		}
+		else if (p == Page::ThemeSettings)
+		{
+			const auto& cfg = Config::get();
+			title    = "UI THEME & COLORS";
+			subtitle = "Customize accent color & opacity";
+
+			const char* presetLabel = (g_st.themePresetIdx >= 0 && g_st.themePresetIdx < kNumThemePresets)
+				? kThemePresets[g_st.themePresetIdx].name
+				: "Custom";
+			items.push_back({ "< Color Preset >", presetLabel, true, true, cfg.accentR, cfg.accentG, cfg.accentB });
+			items.push_back({ "< Accent Red >", std::to_string(cfg.accentR), false, true, cfg.accentR, 20, 20 });
+			items.push_back({ "< Accent Green >", std::to_string(cfg.accentG), false, true, 20, cfg.accentG, 20 });
+			items.push_back({ "< Accent Blue >", std::to_string(cfg.accentB), false, true, 20, 20, cfg.accentB });
+			items.push_back({ "< Panel Opacity >", std::to_string(cfg.bgAlpha) });
+			items.push_back({ "Save UI Colors to .ini", "SAVE" });
+			items.push_back({ "Reset Default Colors", "RESET" });
 		}
 		else if (p == Page::SaveExport)
 		{
@@ -551,15 +677,45 @@ namespace
 						if (next < 0 || next > 12) g_st.editAllHours = true;
 						else g_st.keyframeIdx = next;
 					}
+					if (!g_st.editAllHours && g_st.syncTimeToSlot && g_st.keyframeIdx >= 0 && g_st.keyframeIdx < 13)
+					{
+						g_st.clockFrozen = true;
+						applyLockedTime(tc_cat::kKeyframeHours[g_st.keyframeIdx], 0);
+					}
 				}
 				else if (enterPressed)
 				{
 					g_st.editAllHours = !g_st.editAllHours;
+					if (!g_st.editAllHours && g_st.syncTimeToSlot && g_st.keyframeIdx >= 0 && g_st.keyframeIdx < 13)
+					{
+						g_st.clockFrozen = true;
+						applyLockedTime(tc_cat::kKeyframeHours[g_st.keyframeIdx], 0);
+					}
+				}
+			}
+			else if (sel.extra == -2)
+			{
+				if (enterPressed || dir != 0)
+				{
+					g_st.syncTimeToSlot = !g_st.syncTimeToSlot;
+					if (g_st.syncTimeToSlot && !g_st.editAllHours && g_st.keyframeIdx >= 0 && g_st.keyframeIdx < 13)
+					{
+						g_st.clockFrozen = true;
+						applyLockedTime(tc_cat::kKeyframeHours[g_st.keyframeIdx], 0);
+						setStatus("Time locked to keyframe slot");
+					}
+					else if (!g_st.syncTimeToSlot)
+					{
+						setStatus("Slot time sync OFF");
+					}
 				}
 			}
 			else if (sel.extra == 1)
 			{
-				auto& doc = tc_engine::cycleDocs()[g_st.cycleDocIdx];
+				auto& docs = tc_engine::cycleDocs();
+				if (g_st.cycleDocIdx < 0 || g_st.cycleDocIdx >= (int)docs.size()) return;
+				auto& doc = docs[g_st.cycleDocIdx];
+				if (sel.dataIdx >= doc.rows.size()) return;
 				auto& row = doc.rows[sel.dataIdx];
 				if (dir != 0)
 				{
@@ -577,7 +733,7 @@ namespace
 				}
 				else if (enterPressed)
 				{
-					float curV = (g_st.keyframeIdx < (int)row.values.size()) ? row.values[g_st.keyframeIdx] : 0.0f;
+					float curV = (g_st.keyframeIdx >= 0 && g_st.keyframeIdx < (int)row.values.size()) ? row.values[g_st.keyframeIdx] : 0.0f;
 					startKeyboardFloat(false, sel.dataIdx, 0, curV);
 				}
 				else if (resetPressed)
@@ -614,12 +770,20 @@ namespace
 		}
 		else if (p == Page::ModGroupList && enterPressed)
 		{
+			if (g_st.modGroupIdx != (int)sel.dataIdx && g_st.previewMod)
+			{
+				GRAPHICS::CLEAR_TIMECYCLE_MODIFIER();
+				g_st.previewMod = false;
+			}
 			g_st.modGroupIdx = (int)sel.dataIdx;
 			pushPage(Page::ModVarList);
 		}
 		else if (p == Page::ModVarList)
 		{
-			auto& doc = tc_engine::modDocs()[g_st.modDocIdx];
+			auto& docs = tc_engine::modDocs();
+			if (g_st.modDocIdx < 0 || g_st.modDocIdx >= (int)docs.size()) return;
+			auto& doc = docs[g_st.modDocIdx];
+			if (g_st.modGroupIdx < 0 || g_st.modGroupIdx >= (int)doc.groups.size()) return;
 			const auto& grp = doc.groups[g_st.modGroupIdx];
 
 			if (sel.extra == -1 && (enterPressed || dir != 0))
@@ -645,6 +809,7 @@ namespace
 			}
 			else if (sel.extra >= 0)
 			{
+				if (sel.dataIdx >= doc.rows.size()) return;
 				auto& row = doc.rows[sel.dataIdx];
 				if (dir != 0 && sel.extra < (int)row.values.size())
 				{
@@ -684,32 +849,67 @@ namespace
 			if (g_st.cursor == 0 && dir != 0)
 			{
 				int h = (TIME::GET_CLOCK_HOURS() + dir + 24) % 24;
-				TIME::SET_CLOCK_TIME(h, 0, 0);
-				g_st.frozenHour = h;
+				applyLockedTime(h, 0);
 			}
 			else if (g_st.cursor == 1 && (enterPressed || dir != 0))
 			{
 				g_st.clockFrozen = !g_st.clockFrozen;
-				g_st.frozenHour  = TIME::GET_CLOCK_HOURS();
-				TIME::PAUSE_CLOCK(g_st.clockFrozen ? TRUE : FALSE);
+				if (g_st.clockFrozen)
+				{
+					applyLockedTime(TIME::GET_CLOCK_HOURS(), TIME::GET_CLOCK_MINUTES());
+					setStatus("Time locked");
+				}
+				else
+				{
+					TIME::PAUSE_CLOCK(FALSE);
+					setStatus("Time unlocked");
+				}
 			}
-			else if (g_st.cursor == 2 && enterPressed)
+			else if (g_st.cursor == 2 && (enterPressed || dir != 0))
+			{
+				if (!g_st.weatherLocked)
+				{
+					const char* wn = tc_engine::weatherNameForHash(GAMEPLAY::_GET_CURRENT_WEATHER_TYPE());
+					if (!wn)
+					{
+						setStatus("Unknown weather hash - pick one below");
+					}
+					else
+					{
+						g_st.weatherLocked = true;
+						g_st.lockedWeather = wn;
+						GAMEPLAY::CLEAR_WEATHER_TYPE_PERSIST();
+						GAMEPLAY::SET_WEATHER_TYPE_NOW_PERSIST((char*)g_st.lockedWeather.c_str());
+						setStatus("Weather locked: " + g_st.lockedWeather);
+					}
+				}
+				else
+				{
+					g_st.weatherLocked = false;
+					g_st.lockedWeather.clear();
+					GAMEPLAY::CLEAR_WEATHER_TYPE_PERSIST();
+					setStatus("Weather unlocked");
+				}
+			}
+			else if (g_st.cursor == 3 && enterPressed)
 			{
 				GRAPHICS::CLEAR_TIMECYCLE_MODIFIER();
 				g_st.previewMod = false;
 				setStatus("Timecycle modifier cleared");
 			}
-			else if (g_st.cursor >= 3 && enterPressed)
+			else if (g_st.cursor >= 4 && enterPressed)
 			{
 				static const char* weathers[] = {
 					"CLEAR", "EXTRASUNNY", "CLOUDS", "OVERCAST", "RAIN",
 					"THUNDER", "CLEARING", "NEUTRAL", "SMOG", "FOGGY", "XMAS", "HALLOWEEN"
 				};
-				int wi = g_st.cursor - 3;
+				int wi = g_st.cursor - 4;
 				if (wi >= 0 && wi < 12)
 				{
 					GAMEPLAY::CLEAR_WEATHER_TYPE_PERSIST();
 					GAMEPLAY::SET_WEATHER_TYPE_NOW_PERSIST((char*)weathers[wi]);
+					if (g_st.weatherLocked)
+						g_st.lockedWeather = weathers[wi];
 					setStatus(std::string("Weather set: ") + weathers[wi]);
 				}
 			}
@@ -719,15 +919,94 @@ namespace
 			static const float steps[] = { 0.001f, 0.005f, 0.01f, 0.05f, 0.1f, 0.5f, 1.0f, 5.0f };
 			if (g_st.cursor == 0 && dir != 0)
 			{
-				int idx = 3;
+				int idx = 0;
+				float bestDiff = 1e9f;
 				for (int i = 0; i < 8; ++i)
-					if (std::abs(g_st.stepSize - steps[i]) < 0.0005f) { idx = i; break; }
+				{
+					float d = std::abs(g_st.stepSize - steps[i]);
+					if (d < bestDiff) { bestDiff = d; idx = i; }
+				}
 				idx = std::clamp(idx + dir, 0, 7);
 				g_st.stepSize = steps[idx];
 			}
 			else if (g_st.cursor == 1 && (enterPressed || dir != 0))
 			{
 				g_st.editAllHours = !g_st.editAllHours;
+			}
+			else if (g_st.cursor == 2 && enterPressed)
+			{
+				syncThemePresetIdx();
+				pushPage(Page::ThemeSettings);
+			}
+			else if (g_st.cursor == 4 && enterPressed)
+			{
+				updater::checkAsync();
+				setStatus("Checking GitHub for updates...");
+			}
+			else if (g_st.cursor == 5 && enterPressed)
+			{
+				updater::openReleasesPage();
+				setStatus("Opened latest releases page");
+			}
+			else if (g_st.cursor == 6 && enterPressed)
+			{
+				updater::openGithubPage();
+				setStatus("Opened GitHub page");
+			}
+		}
+		else if (p == Page::ThemeSettings)
+		{
+			auto& cfg = Config::get();
+			const int colorStep = (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 20
+				: ((GetAsyncKeyState(VK_CONTROL) & 0x8000) ? 1 : 5);
+
+			if (g_st.cursor == 0 && (dir != 0 || enterPressed))
+			{
+				int d = (dir != 0) ? dir : 1;
+				int cur = (g_st.themePresetIdx >= 0 && g_st.themePresetIdx < kNumThemePresets)
+					? g_st.themePresetIdx : -1;
+				int next = (cur + d + kNumThemePresets) % kNumThemePresets;
+				g_st.themePresetIdx = next;
+				cfg.accentR = kThemePresets[next].r;
+				cfg.accentG = kThemePresets[next].g;
+				cfg.accentB = kThemePresets[next].b;
+				setStatus(std::string("Theme: ") + kThemePresets[next].name);
+			}
+			else if (g_st.cursor == 1 && dir != 0)
+			{
+				cfg.accentR = std::clamp(cfg.accentR + dir * colorStep, 0, 255);
+				syncThemePresetIdx();
+			}
+			else if (g_st.cursor == 2 && dir != 0)
+			{
+				cfg.accentG = std::clamp(cfg.accentG + dir * colorStep, 0, 255);
+				syncThemePresetIdx();
+			}
+			else if (g_st.cursor == 3 && dir != 0)
+			{
+				cfg.accentB = std::clamp(cfg.accentB + dir * colorStep, 0, 255);
+				syncThemePresetIdx();
+			}
+			else if (g_st.cursor == 4 && dir != 0)
+			{
+				cfg.bgAlpha = std::clamp(cfg.bgAlpha + dir * colorStep, 140, 255);
+			}
+			else if (g_st.cursor == 5 && enterPressed)
+			{
+				if (cfg.save())
+					setStatus("Saved UI colors to TimecycleEditor.ini");
+				else
+					setStatus("Failed to save TimecycleEditor.ini");
+			}
+			else if (g_st.cursor == 6 && enterPressed)
+			{
+				cfg.accentR = 56;
+				cfg.accentG = 189;
+				cfg.accentB = 248;
+				cfg.bgAlpha = 238;
+				syncThemePresetIdx();
+				cfg.save();
+				setStatus("Reset UI colors to default");
 			}
 		}
 		else if (p == Page::SaveExport && enterPressed)
@@ -761,8 +1040,17 @@ namespace
 		const float x = cfg.menuX;
 		const float y = cfg.menuY;
 		const float w = cfg.menuWidth;
+		const int ar = cfg.accentR;
+		const int ag = cfg.accentG;
+		const int ab = cfg.accentB;
+		const int bgA = cfg.bgAlpha;
+		const bool darkAccent = (0.299f * ar + 0.587f * ag + 0.114f * ab) < 90.0f;
+		const int atr = darkAccent ? 235 : ar;
+		const int atg = darkAccent ? 240 : ag;
+		const int atb = darkAccent ? 248 : ab;
 
-		const float headerH = 0.048f;
+		const float accentH = 0.0025f;
+		const float headerH = 0.052f;
 		const float subH    = 0.026f;
 		const float rowH    = 0.028f;
 		const float footerH = 0.026f;
@@ -776,28 +1064,38 @@ namespace
 			startIdx = std::clamp(g_st.cursor - maxVis / 2, 0, total - maxVis);
 		}
 
-		const float totalH = headerH + subH + (float)visCnt * rowH + footerH;
+		const float totalH = accentH + headerH + subH + (float)visCnt * rowH + footerH;
 
 		// Crisp 1px-style outer border
-		drawRectTL(x - 0.0012f, y - 0.0020f, w + 0.0024f, totalH + 0.0040f, 48, 52, 64, 255);
+		drawRectTL(x - 0.0012f, y - 0.0020f, w + 0.0024f, totalH + 0.0040f, 45, 50, 62, 255);
+
+		// Top accent bar
+		drawRectTL(x, y, w, accentH, ar, ag, ab, 255);
 
 		// Header
-		drawRectTL(x, y, w, headerH, 9, 10, 13, 248);
-		drawText(title, x + 0.008f, y + 0.010f, 0.44f, 244, 244, 245, 255, 0);
-		drawText("Made by sensin", x, y + 0.017f, 0.25f, 148, 163, 184, 255, 0, true, x + w - 0.008f);
+		const float hdrY = y + accentH;
+		drawRectTL(x, hdrY, w, headerH, 9, 10, 13, std::min(255, bgA + 12));
+		drawText(title, x + 0.008f, hdrY + 0.007f, 0.33f, 244, 244, 245, 255, 0);
+		drawText(std::string("Mod v") + updater::kModVersion,
+			x + 0.008f, hdrY + 0.029f, 0.21f, atr, atg, atb, 235, 0);
+		drawText("Made by sensin", x, hdrY + 0.008f, 0.22f, 203, 213, 225, 255, 0, true, x + w - 0.008f);
+		drawText("akasensin on github", x, hdrY + 0.026f, 0.20f, 148, 163, 184, 255, 0, true, x + w - 0.008f);
 
 		// Subtitle bar
-		const float subY = y + headerH;
-		drawRectTL(x, subY, w, subH, 18, 20, 26, 242);
-		drawText(subtitle, x + 0.008f, subY + 0.004f, 0.27f, 148, 163, 184, 255, 0);
+		const float subY = hdrY + headerH;
+		drawRectTL(x, subY, w, subH, 16, 18, 24, std::min(255, bgA + 6));
+		drawText(subtitle, x + 0.008f, subY + 0.004f, 0.26f, 148, 163, 184, 255, 0);
 		if (total > 0)
 		{
 			char cntBuf[32];
 			std::snprintf(cntBuf, sizeof(cntBuf), "%d / %d", g_st.cursor + 1, total);
-			drawText(cntBuf, x, subY + 0.004f, 0.27f, 148, 163, 184, 255, 0, true, x + w - 0.008f);
+			drawText(cntBuf, x, subY + 0.004f, 0.26f, atr, atg, atb, 255, 0, true, x + w - 0.008f);
 		}
+		drawRectTL(x, subY + subH - 0.0012f, w, 0.0012f, 36, 40, 50, 255);
 
 		// Rows
+		const bool hasScroll = (total > maxVis && visCnt > 0);
+		const float contentRightPad = hasScroll ? 0.013f : 0.008f;
 		float rowY = subY + subH;
 		for (int i = 0; i < visCnt; ++i)
 		{
@@ -806,35 +1104,59 @@ namespace
 			const bool active = (idx == g_st.cursor);
 
 			if (active)
-				drawRectTL(x, rowY, w, rowH, 226, 232, 240, 242);
+			{
+				drawRectTL(x, rowY, w, rowH, 28, 33, 44, std::min(255, bgA + 15));
+				drawRectTL(x, rowY, 0.0028f, rowH, ar, ag, ab, 255);
+			}
 			else
-				drawRectTL(x, rowY, w, rowH, 12, 13, 17, 232);
+			{
+				const int rowBg = (i % 2 == 0) ? 11 : 14;
+				drawRectTL(x, rowY, w, rowH, rowBg, rowBg + 1, rowBg + 5, bgA);
+			}
 
-			const int tr = active ? 11 : (item.accent ? 56  : 235);
-			const int tg = active ? 12 : (item.accent ? 189 : 238);
-			const int tb = active ? 15 : (item.accent ? 248 : 244);
+			const int tr = active ? 248 : (item.accent ? atr : 226);
+			const int tg = active ? 250 : (item.accent ? atg : 230);
+			const int tb = active ? 252 : (item.accent ? atb : 236);
+
+			const int rr = active ? atr : tr;
+			const int rg = active ? atg : tg;
+			const int rb = active ? atb : tb;
 
 			drawText(item.left, x + 0.008f, rowY + 0.0045f, 0.29f, tr, tg, tb, 255, 0);
 
-			float rightMargin = x + w - 0.008f;
+			float rightMargin = x + w - contentRightPad;
 			if (item.hasColor)
 			{
-				drawRectTL(x + w - 0.020f, rowY + 0.006f, 0.012f, rowH - 0.012f, item.cr, item.cg, item.cb, 255);
+				drawRectTL(rightMargin - 0.012f, rowY + 0.006f, 0.012f, rowH - 0.012f, item.cr, item.cg, item.cb, 255);
 				rightMargin -= 0.016f;
 			}
 			if (!item.right.empty())
-				drawText(item.right, x, rowY + 0.0045f, 0.29f, tr, tg, tb, 255, 0, true, rightMargin);
+				drawText(item.right, x, rowY + 0.0045f, 0.29f, rr, rg, rb, 255, 0, true, rightMargin);
 
 			rowY += rowH;
 		}
 
+		// Scrollbar track & thumb when list exceeds visible rows
+		if (hasScroll)
+		{
+			const float listH = (float)visCnt * rowH;
+			const float sbX = x + w - 0.0045f;
+			const float sbY = subY + subH;
+			drawRectTL(sbX, sbY, 0.0028f, listH, 22, 25, 33, 220);
+			const float thumbH = std::max(0.014f, listH * ((float)visCnt / (float)total));
+			const float frac   = (total > visCnt) ? ((float)startIdx / (float)(total - visCnt)) : 0.0f;
+			const float thumbY = sbY + (listH - thumbH) * frac;
+			drawRectTL(sbX, thumbY, 0.0028f, thumbH, ar, ag, ab, 230);
+		}
+
 		// Footer
-		drawRectTL(x, rowY, w, footerH, 9, 10, 13, 248);
+		drawRectTL(x, rowY, w, 0.0012f, 36, 40, 50, 255);
+		drawRectTL(x, rowY + 0.0012f, w, footerH - 0.0012f, 9, 10, 13, std::min(255, bgA + 12));
 		const Page curP = currentPage();
 		std::string foot = (curP == Page::CycleVarList || curP == Page::ModVarList)
 			? ("[" + cfg.toggleKeyLabel + "] Close  [Enter] Input  [R/Del] Reset  [Shift] 10x")
-			: ("[" + cfg.toggleKeyLabel + "] Close  [Arrows] Edit  [Enter] Input  [Shift] 10x");
-		drawText(foot, x + 0.008f, rowY + 0.004f, 0.24f, 113, 122, 138, 255, 0);
+			: ("[" + cfg.toggleKeyLabel + "] Close  [Arrows] Edit  [Enter] Select  [Back] Return");
+		drawText(foot, x + 0.008f, rowY + 0.004f, 0.24f, 128, 138, 156, 255, 0);
 	}
 }
 
@@ -861,6 +1183,26 @@ namespace ui_menu
 
 	void tick()
 	{
+		static bool s_inited = false;
+		if (!s_inited)
+		{
+			s_inited = true;
+			g_st.stepSize = Config::get().stepDefault;
+			syncThemePresetIdx();
+		}
+
+		// Keep time and weather locked every frame when enabled
+		if (g_st.clockFrozen)
+		{
+			TIME::PAUSE_CLOCK(TRUE);
+			TIME::SET_CLOCK_TIME(g_st.frozenHour, g_st.frozenMinute, 0);
+		}
+		if (g_st.weatherLocked && !g_st.lockedWeather.empty())
+		{
+			if (currentWeatherLabel() != g_st.lockedWeather)
+				GAMEPLAY::SET_WEATHER_TYPE_NOW_PERSIST((char*)g_st.lockedWeather.c_str());
+		}
+
 		// Flush debounced cycle reload
 		if (g_st.cycleReloadPending && GetTickCount64() >= g_st.cycleReloadAt)
 		{
@@ -869,9 +1211,11 @@ namespace ui_menu
 		}
 
 		// Toggle menu key
-		if (consumeKey(Config::get().toggleKey) && !g_st.kbActive)
+		if (!g_st.kbActive && consumeKey(Config::get().toggleKey))
 		{
 			g_st.open = !g_st.open;
+			if (g_st.open)
+				clearJustPressed();
 			AUDIO::PLAY_SOUND_FRONTEND(-1,
 				(char*)(g_st.open ? "SELECT" : "BACK"),
 				(char*)"HUD_FRONTEND_DEFAULT_SOUNDSET", FALSE);
@@ -882,11 +1226,21 @@ namespace ui_menu
 		// Status toast
 		if (!g_st.statusText.empty() && GetTickCount64() < g_st.statusUntil)
 		{
-			drawRectTL(0.36f, 0.02f, 0.28f, 0.032f, 11, 12, 15, 230);
-			drawText(g_st.statusText, 0.37f, 0.025f, 0.32f, 56, 189, 248, 255, 0);
+			const auto& cfg = Config::get();
+			const bool darkAccent = (0.299f * cfg.accentR + 0.587f * cfg.accentG + 0.114f * cfg.accentB) < 90.0f;
+			drawRectTL(0.36f, 0.02f, 0.28f, 0.032f, 11, 12, 15, 238);
+			drawRectTL(0.36f, 0.02f, 0.0028f, 0.032f, cfg.accentR, cfg.accentG, cfg.accentB, 255);
+			drawText(g_st.statusText, 0.37f, 0.025f, 0.31f,
+				darkAccent ? 235 : cfg.accentR,
+				darkAccent ? 240 : cfg.accentG,
+				darkAccent ? 248 : cfg.accentB, 255, 0);
 		}
 
-		if (!g_st.open) return;
+		if (!g_st.open)
+		{
+			clearJustPressed(Config::get().toggleKey);
+			return;
+		}
 
 		// Disable conflicting frontend/combat actions while menu is open
 		CONTROLS::DISABLE_CONTROL_ACTION(2, 27, TRUE);  // Phone
@@ -902,8 +1256,16 @@ namespace ui_menu
 		std::vector<RowItem> items;
 		buildRows(title, subtitle, items);
 
-		if (!g_st.kbActive)
+		if (g_st.kbActive)
+		{
+			clearJustPressed();
+		}
+		else
+		{
 			handleInput(items);
+			if (!g_st.open) return;
+			buildRows(title, subtitle, items);
+		}
 
 		drawMenu(title, subtitle, items);
 	}

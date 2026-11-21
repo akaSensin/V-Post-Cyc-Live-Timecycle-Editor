@@ -118,9 +118,9 @@ int Config::parseKeyCode(const std::string& raw, std::string& labelOut)
 	if (u == "PAGEDOWN" || u == "PGDN"){ labelOut = "PGDN"; return VK_NEXT; }
 	if (u == "TAB")                    { labelOut = "TAB"; return VK_TAB; }
 	if (u == "SPACE")                  { labelOut = "SPACE"; return VK_SPACE; }
-	if (u == "MULTIPLY" || u == "*")   { labelOut = "NUM*"; return VK_MULTIPLY; }
-	if (u == "ADD" || u == "+")        { labelOut = "NUM+"; return VK_ADD; }
-	if (u == "SUBTRACT" || u == "-")   { labelOut = "NUM-"; return VK_SUBTRACT; }
+	if (u == "MULTIPLY" || u == "*" || u == "NUM*") { labelOut = "NUM*"; return VK_MULTIPLY; }
+	if (u == "ADD" || u == "+" || u == "NUM+")      { labelOut = "NUM+"; return VK_ADD; }
+	if (u == "SUBTRACT" || u == "-" || u == "NUM-") { labelOut = "NUM-"; return VK_SUBTRACT; }
 
 	if (u.size() >= 2 && u[0] == 'F')
 	{
@@ -160,29 +160,39 @@ void Config::saveDefaultIniIfMissing() const
 {
 	std::error_code ec;
 	if (fs::exists(iniPath, ec)) return;
+	save();
+}
 
-	std::ofstream out(iniPath, std::ios::binary);
-	if (!out) return;
+bool Config::save() const
+{
+	if (iniPath.empty()) return false;
+	std::ofstream out(iniPath, std::ios::binary | std::ios::trunc);
+	if (!out) return false;
 
 	out <<
 		"; TimecycleEditor configuration\n"
 		"; ToggleKey accepts: , (comma), ., /, ;, F1-F24, INSERT, HOME, END, A-Z, NUMPAD0-NUMPAD9, or hex VK code (e.g. 0xBC)\n"
 		"[General]\n"
-		"ToggleKey = ,\n"
-		"RedirectFromFolder = true\n"
-		"TimecycleFolder = timecycle\n"
-		"ExportFolder = timecycle/export\n"
+		"ToggleKey = " << toggleKeyLabel << "\n"
+		"RedirectFromFolder = " << (redirectFromFolder ? "true" : "false") << "\n"
+		"TimecycleFolder = " << timecycleFolderRaw << "\n"
+		"ExportFolder = " << exportFolderRaw << "\n"
 		"\n"
 		"[Editor]\n"
-		"StepDefault = 0.05\n"
-		"StepFine = 0.005\n"
-		"StepCoarse = 0.50\n"
+		"StepDefault = " << stepDefault << "\n"
+		"StepFine = " << stepFine << "\n"
+		"StepCoarse = " << stepCoarse << "\n"
 		"\n"
 		"[UI]\n"
-		"MenuX = 0.015\n"
-		"MenuY = 0.035\n"
-		"MenuWidth = 0.275\n"
-		"MaxVisibleRows = 14\n";
+		"MenuX = " << menuX << "\n"
+		"MenuY = " << menuY << "\n"
+		"MenuWidth = " << menuWidth << "\n"
+		"MaxVisibleRows = " << maxVisibleRows << "\n"
+		"AccentR = " << accentR << "\n"
+		"AccentG = " << accentG << "\n"
+		"AccentB = " << accentB << "\n"
+		"BgAlpha = " << bgAlpha << "\n";
+	return (bool)out;
 }
 
 void Config::load(HMODULE selfModule)
@@ -204,9 +214,15 @@ void Config::load(HMODULE selfModule)
 		std::string line;
 		while (std::getline(in, line))
 		{
-			// Strip inline comments only if preceded by whitespace (so ';' key works if bare)
-			size_t hashPos = line.find('#');
-			if (hashPos != std::string::npos) line.resize(hashPos);
+			// Strip inline comments only if preceded by whitespace (or at line start)
+			for (size_t hp = line.find('#'); hp != std::string::npos; hp = line.find('#', hp + 1))
+			{
+				if (hp == 0 || std::isspace((unsigned char)line[hp - 1]))
+				{
+					line.resize(hp);
+					break;
+				}
+			}
 			std::string t = trim(line);
 			if (t.empty() || t[0] == ';' || t[0] == '[') continue;
 
@@ -218,8 +234,8 @@ void Config::load(HMODULE selfModule)
 
 			if      (key == "TOGGLEKEY")          toggleKey = parseKeyCode(val, toggleKeyLabel);
 			else if (key == "REDIRECTFROMFOLDER") redirectFromFolder = parseBool(val, redirectFromFolder);
-			else if (key == "TIMECYCLEFOLDER")    { if (!val.empty()) tcFolderRel = val; }
-			else if (key == "EXPORTFOLDER")       { if (!val.empty()) exportFolderRel = val; }
+			else if (key == "TIMECYCLEFOLDER")    { if (!val.empty()) { tcFolderRel = val; timecycleFolderRaw = val; } }
+			else if (key == "EXPORTFOLDER")       { if (!val.empty()) { exportFolderRel = val; exportFolderRaw = val; } }
 			else if (key == "STEPDEFAULT")        stepDefault = std::max(0.0001f, parseFloat(val, stepDefault));
 			else if (key == "STEPFINE")           stepFine    = std::max(0.0001f, parseFloat(val, stepFine));
 			else if (key == "STEPCOARSE")         stepCoarse  = std::max(0.001f,  parseFloat(val, stepCoarse));
@@ -227,6 +243,10 @@ void Config::load(HMODULE selfModule)
 			else if (key == "MENUY")              menuY       = std::clamp(parseFloat(val, menuY), 0.0f, 0.8f);
 			else if (key == "MENUWIDTH")          menuWidth   = std::clamp(parseFloat(val, menuWidth), 0.18f, 0.6f);
 			else if (key == "MAXVISIBLEROWS")     maxVisibleRows = std::clamp(parseInt(val, maxVisibleRows), 6, 24);
+			else if (key == "ACCENTR")            accentR     = std::clamp(parseInt(val, accentR), 0, 255);
+			else if (key == "ACCENTG")            accentG     = std::clamp(parseInt(val, accentG), 0, 255);
+			else if (key == "ACCENTB")            accentB     = std::clamp(parseInt(val, accentB), 0, 255);
+			else if (key == "BGALPHA")            bgAlpha     = std::clamp(parseInt(val, bgAlpha), 120, 255);
 		}
 	}
 

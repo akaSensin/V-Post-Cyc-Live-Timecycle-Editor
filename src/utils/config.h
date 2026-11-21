@@ -19,13 +19,21 @@ struct Config
 	float       stepFine        = 0.005f;
 	float       stepCoarse      = 0.50f;
 
+	std::string timecycleFolderRaw = "timecycle";
+	std::string exportFolderRaw    = "timecycle/export";
+
 	float       menuX           = 0.015f;
 	float       menuY           = 0.035f;
 	float       menuWidth       = 0.275f;
 	int         maxVisibleRows  = 14;
+	int         accentR         = 56;
+	int         accentG         = 189;
+	int         accentB         = 248;
+	int         bgAlpha         = 238;
 
 	static Config& get();
 	void load(HMODULE selfModule);
 	void saveDefaultIniIfMissing() const;
+	bool save() const;
 	static int parseKeyCode(const std::string& raw, std::string& labelOut);
 };
