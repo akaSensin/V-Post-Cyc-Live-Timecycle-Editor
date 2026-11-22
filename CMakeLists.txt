@@ -3,7 +3,7 @@ project(TimecycleEditor LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 
 add_subdirectory(src/vendor/minhook)
 
@@ -36,8 +36,6 @@ target_link_directories(TimecycleEditor PRIVATE
 target_link_libraries(TimecycleEditor PRIVATE
     minhook
     ScriptHookV
-    winhttp
-    shell32
 )
 
 target_compile_definitions(TimecycleEditor PRIVATE

@@ -940,18 +940,15 @@ namespace
 			}
 			else if (g_st.cursor == 4 && enterPressed)
 			{
-				updater::checkAsync();
-				setStatus("Checking GitHub for updates...");
+				setStatus(std::string("Current: v") + updater::kModVersion + " (Check GitHub)");
 			}
 			else if (g_st.cursor == 5 && enterPressed)
 			{
-				updater::openReleasesPage();
-				setStatus("Opened latest releases page");
+				setStatus("github.com/akaSensin/V-Post-Cyc-Live-Timecycle-Editor/releases", 4500);
 			}
 			else if (g_st.cursor == 6 && enterPressed)
 			{
-				updater::openGithubPage();
-				setStatus("Opened GitHub page");
+				setStatus("github.com/akaSensin", 4000);
 			}
 		}
 		else if (p == Page::ThemeSettings)

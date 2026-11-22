@@ -3,7 +3,7 @@
 
 namespace updater
 {
-	inline constexpr const char* kModVersion    = "1.0.0";
+	inline constexpr const char* kModVersion    = "1.0.1";
 	inline constexpr const char* kGithubProfile = "https://github.com/akaSensin";
 	inline constexpr const char* kReleasesUrl   = "https://github.com/akaSensin/V-Post-Cyc-Live-Timecycle-Editor/releases/latest";
 
